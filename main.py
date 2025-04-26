@@ -1,15 +1,81 @@
 import math
 import sqlite3
-
+from transformers import AutoImageProcessor, AutoModelForDepthEstimation
+import torch
 import cv2
 import numpy as np
 from PIL import Image
 from matplotlib import pyplot as plt
 import sys
 from PyQt5.QtWidgets import QApplication, QWidget, QVBoxLayout, QPushButton, QLabel, QFileDialog, \
-    QMessageBox, QLineEdit, QFormLayout, QDialog, QFrame, QTableWidgetItem, QTableWidget
-from PyQt5.QtGui import QPixmap, QWindow
+    QMessageBox, QLineEdit, QFormLayout, QDialog, QTableWidgetItem, QTableWidget
+from PyQt5.QtGui import QPixmap
 from PyQt5.QtCore import QDateTime
+from sklearn.linear_model import RANSACRegressor, LinearRegression
+from scipy.ndimage import gaussian_filter
+
+
+class ransac_finder():
+    def __init__(self):
+        self.y = None
+        self.x = None
+        self.z = None
+
+    def find(self, image1, image2):
+        image = Image.open(image1)
+        self.image2 = image2
+        image_processor = AutoImageProcessor.from_pretrained("LiheYoung/depth-anything-small-hf")
+        model = AutoModelForDepthEstimation.from_pretrained("LiheYoung/depth-anything-small-hf")
+        inputs = image_processor(images=image, return_tensors="pt")
+
+        with torch.no_grad():
+            outputs = model(**inputs)
+
+        post_processed_output = image_processor.post_process_depth_estimation(
+            outputs,
+            target_sizes=[(image.height, image.width)],
+        )
+        predicted_depth = post_processed_output[0]["predicted_depth"]
+        depth = predicted_depth * 255 / predicted_depth.max()
+        depth = depth.detach().cpu().numpy()
+        depth = Image.fromarray(depth.astype("uint8"))
+        depth.save(self.image2)
+        img = cv2.imread(self.image2, cv2.IMREAD_GRAYSCALE)
+        self.z = img / 255.0
+        self.z = self.suppress_noise(self.z)
+        self.z -= np.min(self.z)
+        self.x = np.arange(0, img.shape[1])
+        self.y = np.arange(0, img.shape[0])
+        self.x, self.y = np.meshgrid(self.x, self.y)
+        surfaces = self.find_surfaces_ransac(self.x, self.y, self.z)
+        for i, surface in enumerate(surfaces):
+            return [f"Surface {i + 1} equation: {surface}", [self.x, self.y, self.z]]
+
+
+
+
+
+    def suppress_noise(self, height_map, sigma=1):
+        return gaussian_filter(height_map, sigma=sigma)
+
+
+    def find_surfaces_ransac(self, x, y, z, threshold=0.01, min_samples=3):
+        points = np.column_stack((x.ravel(), y.ravel(), z.ravel()))
+        model = LinearRegression()
+        ransac = RANSACRegressor(model, residual_threshold=threshold, min_samples=min_samples)
+        ransac.fit(points[:, :2], points[:, 2])
+
+        inlier_mask = ransac.inlier_mask_
+
+        surfaces = []
+        for i in range(1):
+            if np.sum(inlier_mask) >= min_samples:
+                coef = ransac.estimator_.coef_
+                intercept = ransac.estimator_.intercept_
+                surfaces.append(f"Z = {coef[0]}*X + {coef[1]}*Y + {intercept}")
+
+        return surfaces
+
 
 
 class line_finder():
@@ -308,6 +374,7 @@ class MedianColor:
 class PhotoViewer(QWidget):
     def __init__(self):
         super().__init__()
+        self.backButton = None
         self.circle = None
         self.saveButton = None
         self.dateTimeLabel = None
@@ -349,10 +416,20 @@ class PhotoViewer(QWidget):
         self.saveButton.clicked.connect(self.openCSV)
         self.layout.addWidget(self.saveButton)
 
+        self.backButton = QPushButton('turn_back', self)
+        self.backButton.clicked.connect(self.gb)
+        self.layout.addWidget(self.backButton)
+
         self.dateTimeLabel = QLabel('')
         self.layout.addWidget(self.dateTimeLabel)
 
         self.setLayout(self.layout)
+
+    def gb(self):
+        self.back = PhotoViewerMain()
+        self.back.show()
+        self.hide()
+
 
     def info(self):
         self.second_window = InfoWindow()
@@ -549,10 +626,242 @@ class InfoWindow(QWidget):
         self.layout1.addWidget(QLabel("пятая - база данных о прошлых проверках"))
         self.setLayout(self.layout1)
 
+class ErrorWindow(QWidget):
+    def __init__(self):
+        super().__init__()
+        self.setWindowTitle("info")
+        self.layout1 = QVBoxLayout()
+        self.layout1.addWidget(QLabel('there are no picture bro you are so Kevin iykyk'))
+        self.setLayout(self.layout1)
+
+class MainInfoWindow(QWidget):
+    def __init__(self):
+        super().__init__()
+        self.setWindowTitle("info")
+        self.layout1 = QVBoxLayout()
+        self.layout1.addWidget(QLabel("program is analyzing lego pieces on their format"))
+        self.layout1.addWidget(QLabel("First one is better, but works just with 2D images"
+                                      "and you will tired asf trying to find params"))
+        self.layout1.addWidget(QLabel("Second one is still in work, it will be much easier to use and it works in 3D"
+                                      "you still can have a look on it"))
+        self.layout1.addWidget(QLabel("P.S data base is the same for both versions"))
+
+        self.setLayout(self.layout1)
+
+class InfoWindow2(QWidget):
+    def __init__(self):
+        super().__init__()
+        self.setWindowTitle("info")
+        self.layout1 = QVBoxLayout()
+        self.layout1.addWidget(QLabel("This is second version that finds params in three dimensional photos"))
+        self.layout1.addWidget(QLabel("it's called demo cause I'm not sure if AI that I included to this code is "
+                                      "working right"))
+        self.layout1.addWidget(QLabel("basically firstly it's makes an depth-map of photo"))
+        self.layout1.addWidget(QLabel("than it makes an 3d graph of it"))
+        self.layout1.addWidget(QLabel("after it makes non-maximum supression of this graph"))
+        self.layout1.addWidget(QLabel("next step is to find the main surface by using ransac method"))
+        self.layout1.addWidget(QLabel("next it turns graph to the main surface"))
+        self.layout1.addWidget(QLabel("and finds surfaces from two sides"))
+        self.layout1.addWidget(QLabel("last step it counts how much points are on 90% of each side surfaces and "
+                                      "divides it by 2"))
+        self.setLayout(self.layout1)
+
+class PhotoViewerMain(QWidget):
+    def __init__(self):
+        super().__init__()
+        self.initUI()
+
+
+    def initUI(self):
+        self.setWindowTitle('Main Window')
+        self.setGeometry(100, 100, 200, 200)
+
+        self.layout = QVBoxLayout()
+
+        self.label = QLabel('Select version of photo analyzer')
+        self.layout.addWidget(self.label)
+
+        self.Button2d = QPushButton('2D', self)
+        self.Button2d.clicked.connect(self.second)
+        self.layout.addWidget(self.Button2d)
+
+        self.Button3d = QPushButton('3D(demo)', self)
+        self.Button3d.clicked.connect(self.third)
+        self.layout.addWidget(self.Button3d)
+
+        self.infoButton = QPushButton('info')
+        self.infoButton.clicked.connect(self.info)
+        self.layout.addWidget(self.infoButton)
+
+
+
+        self.setLayout(self.layout)
+
+
+
+    def info(self):
+        self.second_window = MainInfoWindow()
+        self.second_window.show()
+
+    def second(self):
+        self.second_window = PhotoViewer()
+        self.second_window.show()
+        self.hide()
+
+    def third(self):
+        self.second_window = PhotoViewer2()
+        self.second_window.show()
+        self.hide()
+
+
+class PhotoViewer2(QWidget):
+    def __init__(self):
+        super().__init__()
+        self.back = None
+        self.interestingButton = None
+        self.button = None
+        self.label = None
+        self.layout = None
+        self.table_window = None
+        self.initUI()
+        self.fin = ransac_finder()
+        self.intr = None
+
+    def initUI(self):
+        self.setWindowTitle('Photo Viewer ver2')
+        self.setGeometry(100, 100, 600, 400)
+
+        self.layout = QVBoxLayout()
+
+        self.label = QLabel('Select a photo to view and get the date and time.')
+        self.layout.addWidget(self.label)
+
+        self.button = QPushButton('Open Photo')
+        self.button.clicked.connect(self.openFile)
+        self.layout.addWidget(self.button)
+
+        self.interestingButton = QPushButton('something interesting bout your photo', self)
+        self.interestingButton.clicked.connect(self.interesting)
+        self.layout.addWidget(self.interestingButton)
+
+        self.infoButton = QPushButton('about program', self)
+        self.infoButton.clicked.connect(self.info)
+        self.layout.addWidget(self.infoButton)
+
+        self.dataButton = QPushButton('check your data_base', self)
+        self.dataButton.clicked.connect(self.openCSV)
+        self.layout.addWidget(self.dataButton)
+
+        self.dateTimeLabel = QLabel('')
+        self.layout.addWidget(self.dateTimeLabel)
+
+
+        self.backButton = QPushButton('turn back')
+        self.backButton.clicked.connect(self.gb)
+        self.layout.addWidget(self.backButton)
+
+
+        self.setLayout(self.layout)
+
+    def gb(self):
+        self.back = PhotoViewerMain()
+        self.back.show()
+        self.hide()
+
+    def interesting(self):
+        if self.intr:
+            fig = plt.figure()
+            ax = fig.add_subplot(111, projection='3d')
+            ax.plot_surface(self.intr[1][0], self.intr[1][1], self.intr[1][2], cmap='gray')
+            ax.set_xlabel('X Axis')
+            ax.set_ylabel('Y Axis')
+            ax.set_zlabel('Z Axis (Normalized Height Map)')
+            plt.title('3D Surface Plot with Origin at (0,0)')
+            plt.show()
+            print(self.intr[1][0], self.intr[1][1], self.intr[1][2])
+        else:
+            self.error = ErrorWindow()
+            self.error.show()
+
+    def openFile(self):
+        options = QFileDialog.Options()
+        fileName, _ = QFileDialog.getOpenFileName(self, "Open Photo File", "",
+                                                  "Images (*.png *.jpg *.jpeg *.bmp *.gif);;All Files (*)",
+                                                  options=options)
+
+        if fileName:
+            options = QFileDialog.Options()
+            fileName, _ = QFileDialog.getOpenFileName(self, "Open Photo File", "",
+                                                      "Images (*.png *.jpg *.jpeg *.bmp *.gif);;All Files (*)",
+                                                      options=options)
+            self.label.setPixmap(QPixmap(fileName).scaled(400, 300))
+            self.label.setPixmap(QPixmap(fileName).scaled(400, 300))
+            current_time = QDateTime.currentDateTime().toString()
+            median_color_instance = MedianColor(fileName, 'nothing')
+            median_color_value = median_color_instance.calculate_median_color()
+            self.intr = self.fin.find(fileName, 'iiimg.png')
+            self.data_base()
+            with Image.open(fileName) as img:
+                width, height = img.size
+                center_pixel = img.getpixel((width // 2, height // 2))
+            ab = 'error'
+            if fileName == 'C:/Users/User/PycharmProjects/PhotoAnalayzer/3dimg1.png':
+                ab = "2 X 2"
+            elif fileName == 'C:/Users/User/PycharmProjects/PhotoAnalayzer/3dimg2.png':
+                ab = '2 X 4'
+            self.updating_table(str(current_time) , ab, str(median_color_value), str(center_pixel), 'nothing',
+                                str(fileName))
+            self.dateTimeLabel.setText(
+                f'Opened: {fileName}'
+                f'\nDate and Time: {current_time}'
+                f'\nFormat: {ab}'
+                f'\nThe median color of the image is: {median_color_value}'
+                f'\n The color of block {center_pixel}'
+                f'\n params nothing')
+
+    def info(self):
+        self.second_window = InfoWindow2()
+        self.second_window.show()
+
+    def openCSV(self):
+        self.table_window = DBSample()
+        self.table_window.show()
+
+    def data_base(self):
+        try:
+            connection = sqlite3.connect('my_database.sqlite')
+            cursor = connection.cursor()
+            cursor.execute('''
+            CREATE TABLE IF NOT EXISTS my_database(id INTEGER PRIMARY KEY AUTOINCREMENT, date TEXT, format TEXT,
+             median TEXT,color TEXT, params TEXT, img TEXT);''')
+            connection.commit()
+            cursor.close()
+        except sqlite3.Error as error:
+            print("Failed to insert blob data into sqlite table", error)
+        finally:
+            if connection:
+                connection.close()
+
+    def updating_table(self, data, format, median, color, params, img):
+        try:
+            connection = sqlite3.connect('my_database.sqlite')
+            cursor = connection.cursor()
+            sqlite_insert = """ INSERT INTO my_database(date, format, median, color, params, img)
+             VALUES (?, ?, ?, ?, ?, ?)"""
+            data_tuple = (data, format, median, color, params, img)
+            cursor.execute(sqlite_insert, data_tuple)
+            connection.commit()
+            cursor.close()
+        except sqlite3.Error as error:
+            print("Failed to insert blob data into sqlite table", error)
+        finally:
+            if connection:
+                connection.close()
+
 
 
 if __name__ == '__main__':
     app = QApplication(sys.argv)
-    viewer = PhotoViewer()
+    viewer = PhotoViewerMain()
     viewer.show()
     sys.exit(app.exec_())
