@@ -15,6 +15,7 @@ from sklearn.linear_model import RANSACRegressor, LinearRegression
 from scipy.ndimage import gaussian_filter
 
 
+
 class ransac_finder():
     def __init__(self):
         self.y = None
